@@ -1,0 +1,1 @@
+# Synthetic-CT-from-MRI-using-Gans-model
