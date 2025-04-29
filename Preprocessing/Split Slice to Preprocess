@@ -1,0 +1,175 @@
+import os
+import numpy as np
+import tensorflow as tf
+import nibabel as nib
+from pathlib import Path
+from scipy.ndimage import zoom
+from tqdm import tqdm
+
+def load_nifti_file(file_path):
+    """Load NIfTI file and return data as numpy array"""
+    try:
+        img = nib.load(file_path)
+        data = img.get_fdata()
+        return data, img.affine
+    except Exception as e:
+        print(f"Error loading file {file_path}: {str(e)}")
+        return None, None
+
+def normalize_data(data):
+    """Normalize data to [0,1] range"""
+    data_min = np.min(data)
+    data_max = np.max(data)
+    if data_max - data_min == 0:
+        return data
+    return (data - data_min) / (data_max - data_min)
+
+def resize_3d_volume(data, target_shape=(512, 512, 256)):
+    """Resize 3D volume using scipy zoom"""
+    # Calculate zoom factors
+    zoom_factors = [target_shape[i] / data.shape[i] for i in range(len(target_shape))]
+    
+    # Apply zoom with linear interpolation
+    resized = zoom(data, zoom_factors, order=1)
+    
+    # Ensure exact target shape
+    if resized.shape != target_shape:
+        print(f"Warning: Shape mismatch after resizing. Expected {target_shape}, got {resized.shape}")
+        # Crop or pad if necessary
+        result = np.zeros(target_shape)
+        min_shape = [min(resized.shape[i], target_shape[i]) for i in range(3)]
+        result[:min_shape[0], :min_shape[1], :min_shape[2]] = resized[:min_shape[0], :min_shape[1], :min_shape[2]]
+        return result
+    
+    return resized
+
+def resize_2d_slice(slice_data, target_size=(256, 256)):
+    """Resize 2D slice using TensorFlow"""
+    # Add batch and channel dimensions
+    slice_tensor = tf.convert_to_tensor(slice_data)[tf.newaxis, ..., tf.newaxis]
+    
+    # Resize using bilinear interpolation
+    resized = tf.image.resize(
+        slice_tensor,
+        target_size,
+        method=tf.image.ResizeMethod.BILINEAR
+    )
+    
+    # Remove batch and channel dimensions
+    return resized[0, ..., 0].numpy()
+
+def save_slices(data, affine, output_dir, base_name):
+    """Save each slice as a separate .npy file"""
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Get the range of valid slices (non-empty)
+    non_empty_slices = []
+    for i in range(data.shape[2]):
+        slice_data = data[:, :, i]
+        if np.any(slice_data):  # Check if slice contains any non-zero values
+            non_empty_slices.append(i)
+    
+    print(f"Found {len(non_empty_slices)} non-empty slices in {base_name}")
+    
+    # Save only non-empty slices
+    for idx, i in enumerate(non_empty_slices):
+        slice_data = data[:, :, i]
+        
+        # Normalize slice
+        slice_data = normalize_data(slice_data)
+        
+        # Resize to standard size (256x256)
+        slice_data = resize_2d_slice(slice_data)
+        
+        # Save slice
+        output_path = os.path.join(output_dir, f"{base_name}_slice_{idx:03d}.npy")
+        np.save(output_path, slice_data)
+        
+        # Save affine information
+        affine_path = os.path.join(output_dir, f"{base_name}_slice_{idx:03d}_affine.npy")
+        np.save(affine_path, affine)
+
+def process_file(sample_path, label_path, output_dir):
+    """Process a single pair of MRI and CT files"""
+    print(f"\nProcessing {sample_path}")
+    
+    # Load data
+    sample_data, sample_affine = load_nifti_file(sample_path)
+    label_data, label_affine = load_nifti_file(label_path)
+    
+    if sample_data is None or label_data is None:
+        print(f"Skipping {sample_path} due to loading error")
+        return
+    
+    # Print original shapes
+    print(f"Original shapes - MR: {sample_data.shape}, CT: {label_data.shape}")
+    
+    # Step 1: Normalize data to [0,1] range
+    sample_data = normalize_data(sample_data)
+    label_data = normalize_data(label_data)
+    
+    # Step 2: Resize 3D volumes to standard size
+    target_shape = (512, 512, 256)
+    sample_data = resize_3d_volume(sample_data, target_shape)
+    label_data = resize_3d_volume(label_data, target_shape)
+    
+    print(f"Resized shapes - MR: {sample_data.shape}, CT: {label_data.shape}")
+    
+    if sample_data.shape != label_data.shape:
+        print(f"Shape mismatch after resizing: MR {sample_data.shape} vs CT {label_data.shape}")
+        return
+    
+    # Create output directories
+    sample_output_dir = os.path.join(output_dir, "MR")
+    label_output_dir = os.path.join(output_dir, "CT")
+    os.makedirs(sample_output_dir, exist_ok=True)
+    os.makedirs(label_output_dir, exist_ok=True)
+    
+    # Get base name from file path
+    base_name = os.path.splitext(os.path.splitext(os.path.basename(sample_path))[0])[0]
+    
+    # Step 3: Extract and save 2D slices
+    save_slices(sample_data, sample_affine, sample_output_dir, base_name)
+    save_slices(label_data, label_affine, label_output_dir, base_name)
+
+def main():
+    # Define paths
+    train_dir = "D:/Documents/Brain - Copy/Image Train"
+    label_dir = "D:/Documents/Brain - Copy/Image Label"
+    output_dir = "Data/raw"
+    
+    # Verify directories exist
+    if not os.path.exists(train_dir):
+        raise ValueError(f"Training directory not found: {train_dir}")
+    if not os.path.exists(label_dir):
+        raise ValueError(f"Label directory not found: {label_dir}")
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Find all brain files
+    train_files = list(Path(train_dir).glob('brain*.nii.gz'))
+    if not train_files:
+        raise ValueError(f"No brain files found in {train_dir}")
+    
+    print(f"Found {len(train_files)} files matching 'brain*':")
+    for f in train_files:
+        print(f"  {f}")
+    
+    # Process each file
+    for train_file in tqdm(train_files, desc="Processing files"):
+        # Get corresponding label file
+        label_file = Path(label_dir) / train_file.name
+        
+        if label_file.exists():
+            process_file(str(train_file), str(label_file), output_dir)
+        else:
+            print(f"Warning: No matching label file found for {train_file}")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        raise
+

@@ -1,0 +1,10 @@
+tensorflow==1.15.0
+numpy
+opencv-python
+SimpleITK
+scipy
+matplotlib
+scikit-image
+pillow
+nibabel
+pydicom 

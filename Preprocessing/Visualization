@@ -1,0 +1,157 @@
+import os
+import numpy as np
+import nibabel as nib
+import cv2
+import matplotlib.pyplot as plt
+
+def create_video_from_volume(volume, output_path, fps=10):
+    """Create a video from a 3D volume and save as MOV"""
+    depth, height, width = volume.shape
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Codec for MOV
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    
+    for i in range(depth):
+        slice_img = (volume[i] - volume[i].min()) / (volume[i].max() - volume[i].min()) * 255
+        slice_img = slice_img.astype(np.uint8)
+        out.write(slice_img)
+    
+    out.release()
+
+def display_videos(ct_volume, mr_volume, mask_volume):
+    """Display CT, MR, and Mask volumes in a single window with three orientations."""
+    depth = ct_volume.shape[0]
+    
+    for i in range(depth):
+        # Normalize and convert to uint8 for display
+        ct_frame = (ct_volume[i] - ct_volume[i].min()) / (ct_volume[i].max() - ct_volume[i].min()) * 255
+        ct_frame = ct_frame.astype(np.uint8)
+        
+        mr_frame = (mr_volume[i] - mr_volume[i].min()) / (mr_volume[i].max() - mr_volume[i].min()) * 255
+        mr_frame = mr_frame.astype(np.uint8)
+        
+        mask_frame = (mask_volume[i] * 255).astype(np.uint8)  # Convert mask to binary image
+        
+        # Create a blank canvas for displaying the frames
+        size = max(ct_frame.shape)  # Get the maximum dimension
+        canvas = np.zeros((size * 3, size * 3), dtype=np.uint8)  # 3x3 grid
+        
+        # Resize frames to make them fit in the grid
+        ct_frame_resized = cv2.resize(ct_frame, (size, size))
+        mr_frame_resized = cv2.resize(mr_frame, (size, size))
+        mask_frame_resized = cv2.resize(mask_frame, (size, size))
+        
+        # Place the frames in the canvas
+        canvas[0:size, 0:size] = ct_frame_resized  # CT Top-Left
+        canvas[0:size, size:size*2] = mr_frame_resized  # MR Top-Center
+        canvas[0:size, size*2:size*3] = mask_frame_resized  # Mask Top-Right
+        
+        # For the second row, we can show the same frames but in different orientations
+        canvas[size:size*2, 0:size] = np.rot90(ct_frame_resized)  # CT Rotated
+        canvas[size:size*2, size:size*2] = np.rot90(mr_frame_resized)  # MR Rotated
+        canvas[size:size*2, size*2:size*3] = np.rot90(mask_frame_resized)  # Mask Rotated
+        
+        # For the third row, we can show the same frames but in different orientations
+        canvas[size*2:size*3, 0:size] = np.rot90(ct_frame_resized, 2)  # CT Rotated 180
+        canvas[size*2:size*3, size:size*2] = np.rot90(mr_frame_resized, 2)  # MR Rotated 180
+        canvas[size*2:size*3, size*2:size*3] = np.rot90(mask_frame_resized, 2)  # Mask Rotated 180
+        
+        # Display the combined frames
+        cv2.imshow('Combined Video', canvas)
+        
+        # Wait for a short period to display the frames
+        if cv2.waitKey(100) & 0xFF == ord('q'):
+            break
+
+    cv2.destroyAllWindows()
+
+def display_sample_video(mr_dir, ct_dir, mask_dir):
+    """Display a sample video from processed MR, CT, and Mask images."""
+    # Get a sample MR, CT, and Mask file
+    mr_files = sorted([f for f in os.listdir(mr_dir) if f.endswith('.npy')])
+    ct_files = sorted([f for f in os.listdir(ct_dir) if f.endswith('.npy')])
+    mask_files = sorted([f for f in os.listdir(mask_dir) if f.endswith('.npy')])
+    
+    # Check if there are at least 5 files in each directory
+    if len(mr_files) < 5 or len(ct_files) < 5 or len(mask_files) < 5:
+        print("Not enough files in one or more directories. Need at least 5 files.")
+        return
+    
+    # Get the 5th file (index 4)
+    mr_sample = np.load(os.path.join(mr_dir, mr_files[4]))
+    ct_sample = np.load(os.path.join(ct_dir, ct_files[4]))
+    mask_sample = np.load(os.path.join(mask_dir, mask_files[4]))
+    
+    # Display the videos
+    display_videos(ct_sample, mr_sample, mask_sample)
+
+def display_sample_slice(mr_dir, ct_dir, mask_dir):
+    """Display a random slice from MR, CT, and Mask images using matplotlib."""
+    # Get a sample MR, CT, and Mask file
+    mr_files = sorted([f for f in os.listdir(mr_dir) if f.endswith('.npy')])
+    ct_files = sorted([f for f in os.listdir(ct_dir) if f.endswith('.npy')])
+    mask_files = sorted([f for f in os.listdir(mask_dir) if f.endswith('.npy')])
+    
+    # Check if there are at least 5 files in each directory
+    if len(mr_files) < 5 or len(ct_files) < 5 or len(mask_files) < 5:
+        print("Not enough files in one or more directories. Need at least 5 files.")
+        return
+    
+    # Get the 5th file (index 4)
+    mr_sample = np.load(os.path.join(mr_dir, mr_files[4]))
+    ct_sample = np.load(os.path.join(ct_dir, ct_files[4]))
+    mask_sample = np.load(os.path.join(mask_dir, mask_files[4]))
+    
+    # Check the shape of the samples
+    print(f"MR shape: {mr_sample.shape}, CT shape: {ct_sample.shape}, Mask shape: {mask_sample.shape}")
+    
+    # Since the samples are 2D, we can use them directly
+    mr_slice = mr_sample  # No need to index further
+    ct_slice = ct_sample  # No need to index further
+    mask_slice = mask_sample  # No need to index further
+    
+    # Create a figure with 3 subplots
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    
+    # Display MR slice
+    axes[0].imshow(mr_slice, cmap="bone")
+    axes[0].set_title("MR Image")
+    axes[0].axis('off')
+    
+    # Display CT slice
+    axes[1].imshow(ct_slice, cmap="gray")
+    axes[1].set_title("CT Image")
+    axes[1].axis('off')
+    
+    # Display Mask overlaid on MR
+    axes[2].imshow(mask_slice, cmap = 'gray')
+    axes[2].set_title("MR Head Mask")
+    axes[2].axis('off')
+    
+    plt.tight_layout()
+    plt.show()
+
+if __name__ == '__main__':
+    import argparse
+    
+    # Default paths
+    DEFAULT_MR_DIR = "Data\Preprocessed\MR"
+    DEFAULT_CT_DIR = "Data\Preprocessed\CT"
+    DEFAULT_MASK_DIR = "Data\Preprocessed\head_mask"
+    
+    parser = argparse.ArgumentParser(description='Display sample videos from processed MRI, CT, and Mask images')
+    parser.add_argument('--mr_dir', default=DEFAULT_MR_DIR, help='Directory containing processed MR images')
+    parser.add_argument('--ct_dir', default=DEFAULT_CT_DIR, help='Directory containing processed CT images')
+    parser.add_argument('--mask_dir', default=DEFAULT_MASK_DIR, help='Directory containing processed Mask images')
+    parser.add_argument('--mode', choices=['video', 'slice'], default='slice',
+                      help='Display mode: video for animation or slice for static visualization')
+    
+    args = parser.parse_args()
+    
+    print(f"Using MR directory: {args.mr_dir}")
+    print(f"Using CT directory: {args.ct_dir}")
+    print(f"Using Mask directory: {args.mask_dir}")
+    
+    if args.mode == 'video':
+        display_sample_video(args.mr_dir, args.ct_dir, args.mask_dir)
+    else:
+        display_sample_slice(args.mr_dir, args.ct_dir, args.mask_dir)

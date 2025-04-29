@@ -1,0 +1,209 @@
+import os
+import numpy as np
+import tensorflow as tf
+import cv2
+from tqdm import tqdm
+
+def normalize_data(data):
+    """Normalize data to [0,1] range"""
+    data_min = np.min(data)
+    data_max = np.max(data)
+    if data_max - data_min == 0:
+        return data
+    return (data - data_min) / (data_max - data_min)
+
+def n4_bias_correction(img):
+    """Apply N4 bias field correction using CLAHE as an alternative"""
+    # Store original min and max for contrast preservation
+    orig_min = np.min(img)
+    orig_max = np.max(img)
+    
+    # Normalize to [0,1] range
+    img_norm = normalize_data(img)
+    
+    # Convert to uint8 for CLAHE
+    img_uint8 = (img_norm * 255).astype(np.uint8)
+    
+    # Apply CLAHE with more conservative parameters
+    clahe = cv2.createCLAHE(clipLimit=1.0, tileGridSize=(8,8))
+    corrected = clahe.apply(img_uint8)
+    
+    # Convert back to float and restore original contrast range
+    corrected_float = corrected.astype(float) / 255.0
+    corrected_float = corrected_float * (orig_max - orig_min) + orig_min
+    
+    return corrected_float
+
+def histogram_matching(source, reference):
+    """Match histogram of source to reference"""
+    # Ensure both images are the same size and normalized
+    source = normalize_data(source)
+    reference = normalize_data(reference)
+    
+    # Convert to uint8 for histogram calculation
+    src_uint8 = (source * 255).astype(np.uint8)
+    ref_uint8 = (reference * 255).astype(np.uint8)
+    
+    # Calculate histograms
+    src_hist = cv2.calcHist([src_uint8], [0], None, [256], [0, 256])
+    ref_hist = cv2.calcHist([ref_uint8], [0], None, [256], [0, 256])
+    
+    # Calculate cumulative distribution functions
+    src_cdf = src_hist.cumsum()
+    ref_cdf = ref_hist.cumsum()
+    
+    # Normalize CDFs
+    src_cdf_normalized = src_cdf / src_cdf[-1]
+    ref_cdf_normalized = ref_cdf / ref_cdf[-1]
+    
+    # Create lookup table
+    lookup_table = np.zeros(256)
+    j = 0
+    for i in range(256):
+        while j < 256 and ref_cdf_normalized[j] <= src_cdf_normalized[i]:
+            j += 1
+        lookup_table[i] = j - 1
+    
+    # Apply lookup table
+    matched = lookup_table[src_uint8].astype(np.float32) / 255.0
+    return matched
+
+def create_head_mask(img):
+    """Create binary mask for the head region"""
+    # Convert to uint8
+    img_uint8 = (normalize_data(img) * 255).astype(np.uint8)
+    
+    # Apply Otsu's thresholding
+    _, thresh = cv2.threshold(img_uint8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Copy the thresholded image
+    img_mor = thresh.copy()
+    
+    # Apply multiple morphological closing operations with decreasing kernel sizes
+    for ksize in range(21, 3, -2):
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+        img_mor = cv2.morphologyEx(img_mor, cv2.MORPH_CLOSE, kernel)
+    
+    # Flood fill to remove background
+    h, w = img_mor.shape
+    mask = np.zeros((h + 2, w + 2), np.uint8)
+    im_floodfill = img_mor.copy()
+    cv2.floodFill(im_floodfill, mask, (0, 0), 255)
+    
+    # Invert floodfilled image
+    img_floodfill_inv = cv2.bitwise_not(im_floodfill)
+    
+    # Combine images to get foreground
+    pre_mask = img_mor | img_floodfill_inv
+    
+    # Find the biggest contour
+    mask = np.zeros((h, w), np.uint8)
+    max_pix, max_cnt = 0, None
+    contours, _ = cv2.findContours(pre_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for cnt in contours:
+        num_pix = cv2.contourArea(cnt)
+        if num_pix > max_pix:
+            max_pix = num_pix
+            max_cnt = cnt
+    
+    cv2.drawContours(mask, [max_cnt], -1, 255, -1)
+    
+    # Dilate mask slightly to ensure complete coverage
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.dilate(mask, kernel, iterations=2)
+    
+    return mask > 0
+
+def preprocess_slice(mr_slice, ct_slice=None):
+    """Preprocess a single MR slice and its corresponding CT slice"""
+    # Ensure input arrays are 2D
+    if mr_slice.ndim != 2:
+        raise ValueError(f"Expected 2D array for MR slice, got shape {mr_slice.shape}")
+    if ct_slice is not None and ct_slice.ndim != 2:
+        raise ValueError(f"Expected 2D array for CT slice, got shape {ct_slice.shape}")
+    
+    # Step 1: Apply N4 bias correction to MR
+    mr_corrected = n4_bias_correction(mr_slice)
+    
+    # Step 2: Create head mask from corrected MR
+    head_mask = create_head_mask(mr_corrected)
+    
+    # Step 3: Apply mask
+    mr_masked = mr_corrected * head_mask
+    
+    if ct_slice is not None:
+        ct_masked = ct_slice * head_mask
+        return mr_corrected, ct_masked, head_mask
+    return mr_corrected, None, head_mask
+
+def preprocess_dataset(mr_dir, ct_dir, output_dir):
+    """Preprocess entire dataset"""
+    # Create output directories for all data
+    mr_output = os.path.join(output_dir, "MR")
+    ct_output = os.path.join(output_dir, "CT")
+    mask_output = os.path.join(output_dir, "head_mask")
+    
+    os.makedirs(mr_output, exist_ok=True)
+    os.makedirs(ct_output, exist_ok=True)
+    os.makedirs(mask_output, exist_ok=True)
+    
+    # Create separate directory for MR and CT only
+    mr_ct_only_dir = os.path.join("Data", "preprocessed", "MR_and_CT_only")
+    mr_only_output = os.path.join(mr_ct_only_dir, "MR")
+    ct_only_output = os.path.join(mr_ct_only_dir, "CT")
+    
+    os.makedirs(mr_only_output, exist_ok=True)
+    os.makedirs(ct_only_output, exist_ok=True)
+    
+    # Get list of files
+    mr_files = sorted([f for f in os.listdir(mr_dir) if f.endswith('.npy')])
+    ct_files = sorted([f for f in os.listdir(ct_dir) if f.endswith('.npy')])
+    
+    if len(mr_files) == 0:
+        raise ValueError(f"No .npy files found in MR directory: {mr_dir}")
+    
+    print(f"Found {len(mr_files)} MR files and {len(ct_files)} CT files")
+    
+    # Select template for histogram matching
+    template_idx = np.random.randint(0, len(mr_files))
+    template_mr = np.load(os.path.join(mr_dir, mr_files[template_idx]))
+    
+    # Process each slice
+    for i, (mr_file, ct_file) in enumerate(tqdm(zip(mr_files, ct_files), total=len(mr_files))):
+        try:
+            # Load data
+            mr_slice = np.load(os.path.join(mr_dir, mr_file))
+            ct_slice = np.load(os.path.join(ct_dir, ct_file))
+            
+            # Preprocess slices
+            mr_processed, ct_processed, head_mask = preprocess_slice(mr_slice, ct_slice)
+            
+            # Apply histogram matching to MR
+            mr_matched = histogram_matching(mr_processed, template_mr)
+            
+            # Save results to main preprocessing directory
+            output_base = f"slice_{i:04d}"
+            np.save(os.path.join(mr_output, f"{output_base}.npy"), mr_processed)
+            np.save(os.path.join(ct_output, f"{output_base}.npy"), ct_processed)
+            np.save(os.path.join(mask_output, f"{output_base}.npy"), head_mask)
+            
+            # Save MR and CT to separate directory
+            np.save(os.path.join(mr_only_output, f"{output_base}.npy"), mr_processed)
+            np.save(os.path.join(ct_only_output, f"{output_base}.npy"), ct_processed)
+            
+        except Exception as e:
+            print(f"Error processing {mr_file}: {str(e)}")
+            continue
+
+if __name__ == "__main__":
+    # Define directories
+    mr_dir = "Data/raw/MR"
+    ct_dir = "Data/raw/CT"
+    output_dir = "Data/Preprocessed"
+    
+    print("Starting preprocessing...")
+    print(f"MR directory: {mr_dir}")
+    print(f"CT directory: {ct_dir}")
+    print(f"Output directory: {output_dir}")
+    
+    preprocess_dataset(mr_dir, ct_dir, output_dir)
